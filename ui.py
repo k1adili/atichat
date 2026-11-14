@@ -52,6 +52,7 @@ from PyQt6.QtWidgets import (
     QWidget,
     QCheckBox,
 )
+from app_version import APP_VERSION
 from database import Database
 from network import MAX_MESSAGE_LENGTH, NetworkManager
 
@@ -202,7 +203,7 @@ class MessageHistory(QWidget):
         if file_path:
             reveal_button = QPushButton("نمایش در پوشه")
             reveal_button.setObjectName("revealFileButton")
-            reveal_button.setToolTip("بازکردن پوشه و مشخص‌کردن فایل")
+            reveal_button.setToolTip("بازکردن پوشهٔ فایل")
             reveal_button.clicked.connect(
                 lambda _checked=False, path=file_path:
                 self.revealFileRequested.emit(path)
@@ -423,6 +424,9 @@ class SettingsDialog(QDialog):
         form.addRow("تصویر نمایه", self.avatar_preview)
         form.addRow("", choose_avatar)
         form.addRow("", self.startup_checkbox)
+        self.version_label = QLabel(APP_VERSION)
+        self.version_label.setObjectName("appVersion")
+        form.addRow("نسخهٔ برنامه", self.version_label)
         buttons = QHBoxLayout()
         buttons.addStretch(1)
         buttons.addWidget(cancel_button)
@@ -661,6 +665,13 @@ class ChatWindow(QMainWindow):
         self.connection_label = QLabel("در حال یافتن کاربران…")
         self.connection_label.setObjectName("muted")
         sidebar_layout.addWidget(self.connection_label)
+        self.refresh_users_button = QPushButton("به‌روزرسانی کاربران")
+        self.refresh_users_button.setObjectName("refreshUsersButton")
+        self.refresh_users_button.setToolTip(
+            "اعلان حضور را همین حالا بفرست و کاربران شبکه را دوباره بررسی کن"
+        )
+        self.refresh_users_button.clicked.connect(self._refresh_users)
+        sidebar_layout.addWidget(self.refresh_users_button)
         sidebar_layout.addWidget(self.history_button)
 
         splitter = QSplitter()
@@ -678,7 +689,21 @@ class ChatWindow(QMainWindow):
         self._update_chat_header("گفت‌وگوی عمومی", "")
         for peer in self.network.peers():
             self._add_peer(peer)
+        for contact in self.database.get_private_contacts(self.profile["user_id"]):
+            self._add_offline_contact(contact)
         self._load_history()
+
+    def _add_offline_contact(self, contact: dict[str, Any]) -> None:
+        peer_id = str(contact["user_id"])
+        if self._find_item(peer_id) is not None:
+            return
+        label = str(contact.get("username") or peer_id)
+        item = QListWidgetItem(label)
+        item.setData(Qt.ItemDataRole.UserRole, peer_id)
+        item.setData(Qt.ItemDataRole.UserRole + 1, label)
+        item.setIcon(self._avatar_icon("", label))
+        self.user_list.addItem(item)
+        self._update_unread_item(item, peer_id)
 
     def _add_peer(self, peer: dict[str, Any]) -> None:
         peer_id = peer["user_id"]
@@ -698,6 +723,7 @@ class ChatWindow(QMainWindow):
         self.connection_label.setText(f"{_persian_digits(str(len(self._online)))} کاربر برخط")
         if self._active_peer_id == peer_id:
             self._update_chat_header(peer["username"], str(peer.get("avatar", "")))
+            self.file_button.setEnabled(True)
 
     @classmethod
     def _avatar_icon(cls, encoded: str, display_name: str) -> QIcon:
@@ -761,18 +787,15 @@ class ChatWindow(QMainWindow):
         self._online.pop(peer_id, None)
         item = self._find_item(peer_id)
         if item is not None:
-            row = self.user_list.row(item)
-            self.user_list.takeItem(row)
+            self._update_unread_item(item, peer_id)
         self.connection_label.setText(
             f"{_persian_digits(str(len(self._online)))} کاربر برخط"
             if self._online
             else "کاربر دیگری برخط نیست"
         )
         if self._active_peer_id == peer_id:
-            self._active_peer_id = None
-            public_item = self.user_list.item(0)
-            if public_item is not None:
-                self.user_list.setCurrentItem(public_item)
+            self.file_button.setEnabled(False)
+            self.status_label.setText("کاربر آفلاین است؛ تاریخچهٔ گفت‌وگو در دسترس است.")
 
     def _find_item(self, peer_id: str) -> QListWidgetItem | None:
         for index in range(self.user_list.count()):
@@ -811,8 +834,11 @@ class ChatWindow(QMainWindow):
     def _update_unread_item(self, item: QListWidgetItem, peer_id: str) -> None:
         count = self._unread_counts.get(peer_id, 0)
         base_label = str(item.data(Qt.ItemDataRole.UserRole + 1))
+        presence = (
+            "" if peer_id == "public" or peer_id in self._online else " (آفلاین)"
+        )
         suffix = f"  ({_persian_digits(str(count))})" if count else ""
-        item.setText(f"{base_label}{suffix}")
+        item.setText(f"{base_label}{presence}{suffix}")
         item.setForeground(QBrush(QColor("#65e995" if count else "#e8eaf0")))
         font = item.font()
         font.setBold(bool(count))
@@ -1086,9 +1112,7 @@ class ChatWindow(QMainWindow):
             )
             return
         try:
-            if sys.platform == "win32":
-                subprocess.Popen(["explorer.exe", "/select,", str(path.resolve())])
-            elif not QDesktopServices.openUrl(
+            if not QDesktopServices.openUrl(
                 QUrl.fromLocalFile(str(path.resolve().parent))
             ):
                 raise OSError("بازکردن پوشه انجام نشد.")
@@ -1143,7 +1167,7 @@ class ChatWindow(QMainWindow):
 
     def _handle_event(self, event: dict[str, Any]) -> None:
         kind = event.get("type")
-        if kind == "peer_online":
+        if kind in ("peer_online", "peer_updated"):
             self._add_peer(event)
             return
         if kind == "peer_offline":
@@ -1179,6 +1203,9 @@ class ChatWindow(QMainWindow):
                 self._append_message(message)
             self._notify(event["username"], event["body"], None)
         elif kind == "direct_message":
+            self._add_offline_contact(
+                {"user_id": event["user_id"], "username": event["username"]}
+            )
             message = {
                 "message_id": event["message_id"],
                 "kind": "private",
@@ -1212,6 +1239,9 @@ class ChatWindow(QMainWindow):
                 "timestamp": event["timestamp"],
                 "outgoing": False,
             }
+            self._add_offline_contact(
+                {"user_id": event["user_id"], "username": event["username"]}
+            )
             self.database.add_message(message)
             self._mark_unread(event.get("user_id"))
             if event.get("user_id") == self._active_peer_id:
@@ -1259,9 +1289,10 @@ class ChatWindow(QMainWindow):
             else:
                 item = self._find_item(peer_id)
                 if item is None:
-                    item = QListWidgetItem(f"●  {username}")
-                    item.setData(Qt.ItemDataRole.UserRole, peer_id)
-                    self.user_list.addItem(item)
+                    self._add_offline_contact(
+                        {"user_id": peer_id, "username": username}
+                    )
+                    item = self._find_item(peer_id)
             if item is not None:
                 self.user_list.setCurrentItem(item)
         self._show_from_tray()
@@ -1275,7 +1306,31 @@ class ChatWindow(QMainWindow):
         ):
             self._show_from_tray()
 
+    def _refresh_online_peers(self) -> None:
+        peers = self.network.peers()
+        online_ids = {peer["user_id"] for peer in peers}
+        for peer_id in list(self._online):
+            if peer_id not in online_ids:
+                self._remove_peer(peer_id)
+        for peer in peers:
+            self._add_peer(peer)
+        self._update_connection_label()
+
+    def _refresh_users(self) -> None:
+        self.network.announce_presence()
+        self._refresh_online_peers()
+        self.connection_label.setText("اعلان حضور فرستاده شد؛ در حال جست‌وجوی کاربران…")
+        QTimer.singleShot(3000, self._refresh_online_peers)
+
+    def _update_connection_label(self) -> None:
+        self.connection_label.setText(
+            f"{_persian_digits(str(len(self._online)))} کاربر برخط"
+            if self._online
+            else "کاربر دیگری برخط نیست"
+        )
+
     def _show_from_tray(self) -> None:
+        self._refresh_online_peers()
         self.showNormal()
         self.raise_()
         self.activateWindow()

@@ -164,9 +164,11 @@ class NetworkManager:
         ]
         for thread in self._threads:
             thread.start()
-        self._announce()
+        self.announce_presence()
 
     def stop(self) -> None:
+        if self._stop.is_set():
+            return
         self._stop.set()
         with self._sender_lock:
             sender_queues = list(self._sender_queues.values())
@@ -187,6 +189,13 @@ class NetworkManager:
         self.username = username
         self.avatar = avatar
         self._announce()
+
+    def announce_presence(self) -> None:
+        """Immediately announce this user and prompt peers to announce themselves."""
+        self._announce()
+        self._broadcast(
+            {"type": "presence_request", "user_id": self.user_id}
+        )
 
     def peers(self) -> list[dict[str, Any]]:
         with self._peers_lock:
@@ -493,8 +502,8 @@ class NetworkManager:
             now = time.monotonic()
             if now >= next_heartbeat:
                 self._announce()
-                self._expire_peers(now)
                 next_heartbeat = now + HEARTBEAT_SECONDS
+            self._expire_peers(now)
             udp = self._udp_socket
             if udp is None:
                 break
@@ -516,7 +525,12 @@ class NetworkManager:
         peer_id = packet.get("user_id")
         if not isinstance(peer_id, str) or peer_id == self.user_id:
             return
-        if kind == "presence":
+        if kind == "presence_request":
+            self._send_udp(
+                self._presence_packet(),
+                (address[0], self.udp_port),
+            )
+        elif kind == "presence":
             username = packet.get("username")
             tcp_port = packet.get("tcp_port")
             fingerprint = packet.get("fingerprint")
@@ -542,14 +556,23 @@ class NetworkManager:
                 "last_seen": time.monotonic(),
             }
             with self._peers_lock:
-                is_new = peer_id not in self._peers
+                previous = self._peers.get(peer_id)
+                is_new = previous is None
+                is_updated = previous is not None and any(
+                    previous[key] != peer[key]
+                    for key in (
+                        "username",
+                        "avatar",
+                        "ip",
+                        "tcp_port",
+                        "fingerprint",
+                    )
+                )
                 self._peers[peer_id] = peer
             if is_new:
                 self._emit({"type": "peer_online", **peer})
-            self._send_udp(
-                self._presence_packet(),
-                (address[0], self.udp_port),
-            )
+            elif is_updated:
+                self._emit({"type": "peer_updated", **peer})
         elif kind == "public_message":
             body = packet.get("body")
             username = packet.get("username")

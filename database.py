@@ -166,7 +166,7 @@ class Database:
     def get_public_messages(self, limit: int = 500) -> list[dict[str, Any]]:
         return self._get_messages(
             "SELECT * FROM messages WHERE kind = 'public' "
-            "ORDER BY julianday(timestamp) DESC, id DESC LIMIT ?",
+            "ORDER BY id DESC LIMIT ?",
             (limit,),
         )
 
@@ -179,10 +179,47 @@ class Database:
             WHERE kind IN ('private', 'file')
               AND ((sender_id = ? AND recipient_id = ?)
                 OR (sender_id = ? AND recipient_id = ?))
-            ORDER BY julianday(timestamp) DESC, id DESC LIMIT ?
+            ORDER BY id DESC LIMIT ?
             """,
             (user_id, peer_id, peer_id, user_id, limit),
         )
+
+    def get_private_contacts(self, user_id: str) -> list[dict[str, str]]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                WITH conversation_messages AS (
+                    SELECT
+                        id,
+                        CASE WHEN sender_id = ? THEN recipient_id ELSE sender_id END
+                            AS peer_id,
+                        CASE WHEN sender_id = ? THEN recipient_name ELSE sender_name END
+                            AS peer_name
+                    FROM messages
+                    WHERE kind IN ('private', 'file')
+                      AND (sender_id = ? OR recipient_id = ?)
+                ),
+                latest_messages AS (
+                    SELECT peer_id, MAX(id) AS latest_id
+                    FROM conversation_messages
+                    WHERE peer_id != ''
+                    GROUP BY peer_id
+                )
+                SELECT conversation_messages.peer_id, conversation_messages.peer_name
+                FROM latest_messages
+                JOIN conversation_messages
+                  ON conversation_messages.id = latest_messages.latest_id
+                ORDER BY latest_messages.latest_id DESC
+                """,
+                (user_id, user_id, user_id, user_id),
+            ).fetchall()
+        return [
+            {
+                "user_id": str(row["peer_id"]),
+                "username": str(row["peer_name"] or row["peer_id"]),
+            }
+            for row in rows
+        ]
 
     def _get_messages(
         self, query: str, parameters: tuple[Any, ...]

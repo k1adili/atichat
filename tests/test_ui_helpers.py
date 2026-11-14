@@ -8,7 +8,7 @@ from unittest.mock import Mock, call, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6.QtCore import QBuffer, QIODevice, QPoint, Qt
+from PyQt6.QtCore import QBuffer, QIODevice, QPoint, QUrl, Qt
 from PyQt6.QtGui import QIcon, QImage, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
@@ -21,6 +21,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from app_version import APP_VERSION
 from ui import (
     ChatWindow,
     FileSendDialog,
@@ -110,6 +111,7 @@ class UiWidgetTests(unittest.TestCase):
         database = Mock()
         database.get_profile.return_value = profile
         database.get_public_messages.return_value = []
+        database.get_private_contacts.return_value = []
         database.get_private_messages.return_value = []
         network = Mock()
         network.peers.return_value = []
@@ -188,10 +190,155 @@ class UiWidgetTests(unittest.TestCase):
         self.assertEqual(peer_item.text(), "همتا")
         self.assertEqual(window._unread_counts.get("peer-id"), None)
         self.assertEqual(window._unread_counts.get("public"), 1)
+        window._remove_peer("peer-id")
+        self.assertIs(window._find_item("peer-id"), peer_item)
+        self.assertIn("آفلاین", peer_item.text())
+        self.assertEqual(window._active_peer_id, "peer-id")
+        self.assertFalse(window.file_button.isEnabled())
 
         window.user_list.setCurrentItem(public_item)
         self.assertEqual(public_item.text(), "گفت‌وگوی عمومی")
         self.assertNotIn("public", window._unread_counts)
+        window.close()
+
+    def test_peer_updates_refresh_name_in_list_and_chat_header(self) -> None:
+        profile = {
+            "user_id": "local-user",
+            "display_name": "کاربر",
+            "avatar": "",
+            "startup_enabled": False,
+        }
+        database = Mock()
+        database.get_profile.return_value = profile
+        database.get_public_messages.return_value = []
+        database.get_private_contacts.return_value = []
+        database.get_private_messages.return_value = []
+        network = Mock()
+        network.peers.return_value = []
+
+        window = ChatWindow(database, network, NetworkBridge(), Path("."))
+        window._add_peer(
+            {"user_id": "peer-id", "username": "نام قبلی", "avatar": ""}
+        )
+        item = window._find_item("peer-id")
+        window.user_list.setCurrentItem(item)
+
+        window._handle_event(
+            {
+                "type": "peer_updated",
+                "user_id": "peer-id",
+                "username": "نام جدید",
+                "avatar": "",
+            }
+        )
+
+        self.assertEqual(item.data(Qt.ItemDataRole.UserRole + 1), "نام جدید")
+        self.assertEqual(item.text(), "نام جدید")
+        self.assertEqual(window.chat_title.text(), "نام جدید")
+        window._allow_close = True
+        window.close()
+
+    def test_showing_window_refreshes_peer_status_from_network(self) -> None:
+        profile = {
+            "user_id": "local-user",
+            "display_name": "کاربر",
+            "avatar": "",
+            "startup_enabled": False,
+        }
+        database = Mock()
+        database.get_profile.return_value = profile
+        database.get_public_messages.return_value = []
+        database.get_private_contacts.return_value = []
+        database.get_private_messages.return_value = []
+        peer = {"user_id": "peer-id", "username": "همتا", "avatar": ""}
+        network = Mock()
+        network.peers.return_value = [peer]
+
+        window = ChatWindow(database, network, NetworkBridge(), Path("."))
+        item = window._find_item("peer-id")
+        self.assertIn("peer-id", window._online)
+        network.peers.return_value = []
+
+        window._show_from_tray()
+
+        self.assertNotIn("peer-id", window._online)
+        self.assertIn("آفلاین", item.text())
+        window._allow_close = True
+        window.close()
+
+    def test_manual_refresh_announces_presence_and_updates_peer_list(self) -> None:
+        profile = {
+            "user_id": "local-user",
+            "display_name": "کاربر",
+            "avatar": "",
+            "startup_enabled": False,
+        }
+        database = Mock()
+        database.get_profile.return_value = profile
+        database.get_public_messages.return_value = []
+        database.get_private_contacts.return_value = []
+        database.get_private_messages.return_value = []
+        peer = {"user_id": "peer-id", "username": "همتا", "avatar": ""}
+        network = Mock()
+        network.peers.return_value = []
+
+        window = ChatWindow(database, network, NetworkBridge(), Path("."))
+        network.peers.return_value = [peer]
+
+        window.refresh_users_button.click()
+
+        network.announce_presence.assert_called_once_with()
+        self.assertIn("peer-id", window._online)
+        self.assertIn("در حال جست‌وجوی کاربران", window.connection_label.text())
+        window._allow_close = True
+        window.close()
+
+    def test_offline_contact_history_is_loaded_and_files_remain_accessible(self) -> None:
+        profile = {
+            "user_id": "local-user",
+            "display_name": "کاربر",
+            "avatar": "",
+            "startup_enabled": False,
+        }
+        database = Mock()
+        database.get_profile.return_value = profile
+        database.get_public_messages.return_value = []
+        database.get_private_contacts.return_value = [
+            {"user_id": "peer-id", "username": "کاربر آفلاین"}
+        ]
+        database.get_private_messages.return_value = [
+            {
+                "message_id": "old-message",
+                "kind": "private",
+                "sender_name": "کاربر آفلاین",
+                "body": "پیام قبلی",
+                "timestamp": "2026-11-04T08:30:00+00:00",
+                "outgoing": False,
+            },
+            {
+                "message_id": "old-file",
+                "kind": "file",
+                "sender_name": "کاربر آفلاین",
+                "body": "document.pdf",
+                "file_path": "C:\\Downloads\\document.pdf",
+                "timestamp": "2026-11-04T08:31:00+00:00",
+                "outgoing": False,
+            },
+        ]
+        network = Mock()
+        network.peers.return_value = []
+        window = ChatWindow(database, network, NetworkBridge(), Path("."))
+
+        contact = window._find_item("peer-id")
+        self.assertIsNotNone(contact)
+        self.assertIn("آفلاین", contact.text())
+        window.user_list.setCurrentItem(contact)
+        database.get_private_messages.assert_called_once_with("local-user", "peer-id")
+        self.assertEqual(len(window.messages.findChildren(QLabel, "messageBody")), 2)
+        self.assertIsNotNone(
+            window.messages.findChild(QPushButton, "revealFileButton")
+        )
+        self.assertFalse(window.file_button.isEnabled())
         window._allow_close = True
         window.close()
 
@@ -205,7 +352,7 @@ class UiWidgetTests(unittest.TestCase):
         self.assertEqual(deleted, ["message-id"])
         history.close()
 
-    def test_file_history_has_reveal_button_and_selects_file_in_explorer(self) -> None:
+    def test_file_history_reveals_sent_and_received_files_in_their_folder(self) -> None:
         profile = {
             "user_id": "local-user",
             "display_name": "کاربر",
@@ -215,39 +362,38 @@ class UiWidgetTests(unittest.TestCase):
         database = Mock()
         database.get_profile.return_value = profile
         database.get_public_messages.return_value = []
+        database.get_private_contacts.return_value = []
         network = Mock()
         network.peers.return_value = []
         window = ChatWindow(database, network, NetworkBridge(), Path("."))
 
         with tempfile.TemporaryDirectory() as temporary:
-            file_path = Path(temporary) / "received.txt"
+            file_path = Path(temporary) / "پوشهٔ آزمایشی" / "sample file.txt"
+            file_path.parent.mkdir()
             file_path.write_text("file", encoding="utf-8")
-            revealed: list[str] = []
-            window.messages.revealFileRequested.connect(revealed.append)
-            window._append_message(
-                {
-                    "message_id": "received-file",
-                    "kind": "file",
-                    "sender_name": "همتا",
-                    "body": file_path.name,
-                    "file_path": str(file_path),
-                    "timestamp": "2026-11-04T08:30:00+00:00",
-                    "outgoing": False,
-                }
-            )
-            reveal_button = window.messages.findChild(
-                QPushButton, "revealFileButton"
-            )
-            self.assertIsNotNone(reveal_button)
-            with (
-                patch("ui.sys.platform", "win32"),
-                patch("ui.subprocess.Popen") as popen,
-            ):
-                reveal_button.click()
-                self.assertEqual(revealed, [str(file_path)])
-            popen.assert_called_once_with(
-                ["explorer.exe", "/select,", str(file_path.resolve())]
-            )
+            for outgoing in (False, True):
+                with self.subTest(outgoing=outgoing):
+                    window.messages.clear()
+                    window._append_message(
+                        {
+                            "message_id": f"{outgoing}-file",
+                            "kind": "file",
+                            "sender_name": "شما" if outgoing else "همتا",
+                            "body": file_path.name,
+                            "file_path": str(file_path),
+                            "timestamp": "2026-11-04T08:30:00+00:00",
+                            "outgoing": outgoing,
+                        }
+                    )
+                    reveal_button = window.messages.findChild(
+                        QPushButton, "revealFileButton"
+                    )
+                    self.assertIsNotNone(reveal_button)
+                    with patch("ui.QDesktopServices.openUrl", return_value=True) as open_url:
+                        reveal_button.click()
+                        open_url.assert_called_once_with(
+                            QUrl.fromLocalFile(str(file_path.parent.resolve()))
+                        )
         window._allow_close = True
         window.close()
 
@@ -271,6 +417,15 @@ class UiWidgetTests(unittest.TestCase):
             self.assertTrue(dialog.avatar)
             dialog.close()
 
+    def test_settings_dialog_shows_current_app_version(self) -> None:
+        dialog = SettingsDialog(
+            {"avatar": "", "display_name": "کاربر", "startup_enabled": False}
+        )
+
+        self.assertEqual(dialog.version_label.text(), APP_VERSION)
+
+        dialog.close()
+
     def test_file_send_dialog_supports_caption_and_cancel(self) -> None:
         dialog = FileSendDialog(Path("sample.txt"))
         dialog.caption_input.setPlainText("متن همراه فایل")
@@ -289,6 +444,7 @@ class UiWidgetTests(unittest.TestCase):
         database = Mock()
         database.get_profile.return_value = profile
         database.get_public_messages.return_value = []
+        database.get_private_contacts.return_value = []
         network = Mock()
         network.peers.return_value = []
         network.send_file.return_value = {
@@ -340,6 +496,7 @@ class UiWidgetTests(unittest.TestCase):
         database = Mock()
         database.get_profile.return_value = profile
         database.get_public_messages.return_value = []
+        database.get_private_contacts.return_value = []
         database.get_private_messages.return_value = []
         network = Mock()
         network.peers.return_value = []

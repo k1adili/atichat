@@ -116,6 +116,102 @@ class DatabaseTests(unittest.TestCase):
             ["outgoing", "file", "incoming"],
         )
 
+    def test_histories_follow_local_insert_order_not_sender_clock(self) -> None:
+        for message_id, timestamp in (
+            ("older", "2026-01-01T10:00:00+00:00"),
+            ("newer-with-slow-clock", "2020-01-01T00:00:00+00:00"),
+        ):
+            self.database.add_message(
+                {
+                    "message_id": message_id,
+                    "kind": "public",
+                    "sender_id": "peer",
+                    "sender_name": "Peer",
+                    "body": message_id,
+                    "timestamp": timestamp,
+                    "outgoing": False,
+                }
+            )
+        self.assertEqual(
+            [
+                message["message_id"]
+                for message in self.database.get_public_messages()
+            ],
+            ["older", "newer-with-slow-clock"],
+        )
+
+        for message_id, timestamp in (
+            ("private-older", "2026-01-01T10:00:00+00:00"),
+            ("private-newer-with-slow-clock", "2020-01-01T00:00:00+00:00"),
+        ):
+            self.database.add_message(
+                {
+                    "message_id": message_id,
+                    "kind": "private",
+                    "sender_id": "peer",
+                    "sender_name": "Peer",
+                    "recipient_id": "me",
+                    "recipient_name": "Me",
+                    "body": message_id,
+                    "timestamp": timestamp,
+                    "outgoing": False,
+                }
+            )
+        self.assertEqual(
+            [
+                message["message_id"]
+                for message in self.database.get_private_messages("me", "peer")
+            ],
+            ["private-older", "private-newer-with-slow-clock"],
+        )
+
+    def test_private_contacts_include_latest_names_for_offline_history(self) -> None:
+        messages = [
+            {
+                "message_id": "first",
+                "kind": "private",
+                "sender_id": "me",
+                "sender_name": "Me",
+                "recipient_id": "peer-a",
+                "recipient_name": "Old name",
+                "body": "hello",
+                "timestamp": "2026-01-01T10:00:00+00:00",
+                "outgoing": True,
+            },
+            {
+                "message_id": "file",
+                "kind": "file",
+                "sender_id": "peer-b",
+                "sender_name": "Peer B",
+                "recipient_id": "me",
+                "recipient_name": "Me",
+                "body": "document.pdf",
+                "timestamp": "2026-01-01T10:01:00+00:00",
+                "outgoing": False,
+            },
+            {
+                "message_id": "latest",
+                "kind": "private",
+                "sender_id": "me",
+                "sender_name": "Me",
+                "recipient_id": "peer-a",
+                "recipient_name": "Current name",
+                "body": "welcome back",
+                "timestamp": "2026-01-01T10:02:00+00:00",
+                "outgoing": True,
+            },
+        ]
+        for message in messages:
+            self.database.add_message(message)
+
+        self.assertEqual(
+            self.database.get_private_contacts("me"),
+            [
+                {"user_id": "peer-a", "username": "Current name"},
+                {"user_id": "peer-b", "username": "Peer B"},
+            ],
+        )
+
     def test_duplicate_message_ids_are_ignored(self) -> None:
         message = {
             "message_id": "duplicate",
